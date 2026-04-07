@@ -1,37 +1,56 @@
 #!/bin/bash
 
-# Controleer of het script als root wordt uitgevoerd
-if [[ $EUID -ne 0 ]]; then
-   echo "Dit script moet als root worden uitgevoerd (gebruik sudo)."
-   exit 1
+# 1. Gegevens verzamelen (Er wordt nog niets aangepast)
+clear
+echo "======================================================="
+echo "   Nginx Reverse Proxy Setup voor Ubuntu 24.04"
+echo "======================================================="
+echo ""
+
+read -p "Stap 1: Welk domein moet de site krijgen? (bijv. gamepanel.nl): " DOMAIN
+read -p "Stap 2: Wat is de huidige locatie/poort? (bijv. localhost:30000): " TARGET
+
+# Controleer of input leeg is
+if [[ -z "$DOMAIN" || -z "$TARGET" ]]; then
+    echo "❌ Fout: Je moet beide velden invullen!"
+    exit 1
 fi
 
-echo "-------------------------------------------------------"
-echo "   Nginx Reverse Proxy & SSL Setup voor Ubuntu 24.04"
-echo "-------------------------------------------------------"
+echo ""
+echo "Ingevoerde gegevens:"
+echo "Domein: $DOMAIN"
+echo "Target: $TARGET"
+echo "Config bestand: /etc/nginx/sites-available/$DOMAIN"
+echo ""
+read -p "Klopt dit? Druk op [ENTER] om de installatie te starten..."
 
-# 1. Vragen om input
-read -p "Welk domein moet er komen te staan? (bijv. gamepanel.nl): " DOMAIN
-read -p "Naar welk adres moet dit worden doorgestuurd? (bijv. 127.0.0.1:30000 of node01.fivecloud.nl:30000): " TARGET
+# 2. Installatie van benodigdheden
+echo "------- Bezig met installeren van Nginx en Certbot -------"
+sudo apt update
+sudo apt install -y nginx certbot python3-certbot-nginx
 
-# Zorg dat de TARGET een http prefix heeft voor de config als het er niet staat
+# 3. Firewall instellen (UFW)
+echo "------- Firewall controleren -------"
+# Check of UFW actief is, zo ja, sta Nginx toe
+if sudo ufw status | grep -q "Status: active"; then
+    echo "Firewall is actief, poorten 80 en 443 worden geopend..."
+    sudo ufw allow 'Nginx Full'
+else
+    echo "Firewall staat uit, geen aanpassing nodig."
+fi
+
+# 4. Nginx Configuratie aanmaken met de domeinnaam als bestandsnaam
+echo "------- Nginx config aanmaken -------"
+CONFIG_FILE="/etc/nginx/sites-available/$DOMAIN"
+
+# Zorg dat TARGET http:// bevat als het er niet in staat
 if [[ $TARGET != http* ]]; then
     PROXY_TARGET="http://$TARGET"
 else
     PROXY_TARGET=$TARGET
 fi
 
-echo ""
-echo "Bezig met installeren van benodigdheden (Nginx en Certbot)..."
-apt update
-apt install -y nginx certbot python3-certbot-nginx
-
-# 2. Nginx Configuratie aanmaken
-CONFIG_FILE="/etc/nginx/sites-available/$DOMAIN"
-
-echo "Configuratie aanmaken in $CONFIG_FILE..."
-
-cat <<EOF > $CONFIG_FILE
+sudo bash -c "cat <<EOF > $CONFIG_FILE
 server {
     listen 80;
     server_name $DOMAIN www.$DOMAIN;
@@ -43,52 +62,40 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
-        # Voor websockets (vaak nodig bij game panels)
+        # WebSocket ondersteuning (belangrijk voor game panels)
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "Upgrade";
+        proxy_set_header Connection \"upgrade\";
     }
 }
-EOF
+EOF"
 
-# 3. Linken naar sites-enabled
-ln -sf $CONFIG_FILE /etc/nginx/sites-enabled/
+# 5. Configureren en testen
+echo "------- Configureren en testen -------"
 
-# Verwijder default config als die nog bestaat om conflicten te voorkomen
-rm -f /etc/nginx/sites-enabled/default
+# Linken van sites-available naar sites-enabled
+sudo ln -sf "$CONFIG_FILE" "/etc/nginx/sites-enabled/"
 
-# Nginx testen en herstarten
-echo "Nginx config testen..."
-nginx -t
-if [ $? -eq 0 ]; then
-    systemctl restart nginx
-    echo "Nginx is succesvol herstart."
+# Test de nginx configuratie op syntax fouten
+if sudo nginx -t; then
+    echo "Nginx configuratie is correct. Herstarten..."
+    sudo systemctl reload nginx
 else
-    echo "Er zit een fout in de Nginx configuratie. Controleer je invoer."
+    echo "❌ Er zit een fout in de Nginx config. We draaien de wijziging niet door."
     exit 1
 fi
 
-# 4. HTTPS (SSL) via Certbot
-echo ""
-echo "-------------------------------------------------------"
-echo "   SSL Certificaat aanvragen via Let's Encrypt"
-echo "-------------------------------------------------------"
-echo "Zorg ervoor dat je DNS (A-record) van $DOMAIN al naar dit IP-adres verwijst!"
-echo ""
+# 6. SSL Certificaat aanvragen
+echo "------- SSL Certificaat aanvragen (Let's Encrypt) -------"
+echo "Zorg dat je DNS (A-record) al naar dit IP-adres verwijst!"
 
-# Voer certbot uit
-certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos --register-unsafely-without-email
+sudo certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
 
-if [ $? -eq 0 ]; then
-    echo ""
-    echo "-------------------------------------------------------"
-    echo "✅ SUCCES!"
-    echo "Je website is nu beveiligd en bereikbaar op:"
-    echo "https://$DOMAIN"
-    echo "Alles wordt doorgestuurd naar: $PROXY_TARGET"
-    echo "-------------------------------------------------------"
-else
-    echo ""
-    echo "❌ SSL aanvraag is mislukt."
-    echo "Waarschijnlijk staat de DNS nog niet goed of blokkeert een firewall poort 80/443."
-fi
+# Afronding
+echo ""
+echo "======================================================="
+echo "✅ KLAAR!"
+echo "Website: https://$DOMAIN"
+echo "Configuratie: /etc/nginx/sites-available/$DOMAIN"
+echo "Alles is beveiligd met SSL en de firewall is bijgewerkt."
+echo "======================================================="
