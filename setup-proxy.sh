@@ -1,74 +1,60 @@
 #!/bin/bash
 
-# Controleer of script als root wordt uitgevoerd
+# Controleer of het script als root wordt uitgevoerd
 if [[ $EUID -ne 0 ]]; then
-   echo "❌ Voer dit script uit met sudo: sudo ./setup-proxy.sh"
+   echo "❌ Voer dit script uit met sudo."
    exit 1
 fi
 
-clear
-echo "======================================================="
-echo "   Nginx Reverse Proxy Setup voor Ubuntu 24.04"
-echo "======================================================="
+# Functie voor het hoofdmenu
+show_menu() {
+    clear
+    echo "======================================================="
+    echo "   Nginx Proxy Manager - Ubuntu 24.04"
+    echo "======================================================="
+    echo "1) Nieuwe Proxy / Site toevoegen (incl. SSL)"
+    echo "2) Bestaande Proxy / Site verwijderen"
+    echo "3) Afsluiten"
+    echo "======================================================="
+    echo -n "Maak een keuze [1-3]: "
+    read -r CHOICE < /dev/tty
+}
 
-# Loop voor Domeinnaam
-DOMAIN=""
-while [[ -z "$DOMAIN" ]]; do
-    echo -n "👉 Stap 1: Welk domein moet de site krijgen? (bijv. gamepanel.nl): "
-    read -r DOMAIN
-    if [[ -z "$DOMAIN" ]]; then
-        echo "   Fout: Domein mag niet leeg zijn!"
+# Functie om een nieuwe proxy aan te maken
+create_proxy() {
+    echo ""
+    DOMAIN=""
+    while [[ -z "$DOMAIN" ]]; do
+        echo -n "👉 Welk domein moet de site krijgen? (bijv. gamepanel.nl): "
+        read -r DOMAIN < /dev/tty
+    done
+
+    TARGET=""
+    while [[ -z "$TARGET" ]]; do
+        echo -n "👉 Naar welk adres:poort moet dit? (bijv. 127.0.0.1:30000): "
+        read -r TARGET < /dev/tty
+    done
+
+    # Installatie benodigdheden
+    echo "📦 Installeren van Nginx en Certbot (indien nodig)..."
+    apt update -y && apt install -y nginx certbot python3-certbot-nginx
+
+    # Firewall
+    if ufw status | grep -q "Status: active"; then
+        ufw allow 'Nginx Full'
     fi
-done
 
-# Loop voor Target
-TARGET=""
-while [[ -z "$TARGET" ]]; do
-    echo -n "👉 Stap 2: Naar welk adres/poort moet dit? (bijv. localhost:30000): "
-    read -r TARGET
-    if [[ -z "$TARGET" ]]; then
-        echo "   Fout: Adres mag niet leeg zijn!"
+    # Config aanmaken
+    CONFIG_NAME="$DOMAIN.conf"
+    CONFIG_FILE="/etc/nginx/sites-available/$CONFIG_NAME"
+
+    if [[ $TARGET != http* ]]; then
+        PROXY_TARGET="http://$TARGET"
+    else
+        PROXY_TARGET=$TARGET
     fi
-done
 
-echo ""
-echo "-------------------------------------------------------"
-echo "Controleer de gegevens:"
-echo "Domein:         $DOMAIN"
-echo "Doorsturen naar: $TARGET"
-echo "Config bestand:  /etc/nginx/sites-available/$DOMAIN"
-echo "-------------------------------------------------------"
-echo -n "Druk op [ENTER] om de installatie te starten of CTRL+C om te stoppen..."
-read -r
-
-echo ""
-echo "🚀 Starten met de installatie..."
-
-# 1. Installatie van benodigdheden
-echo "📦 Installeren van Nginx en Certbot..."
-apt update -y && apt install -y nginx certbot python3-certbot-nginx
-
-# 2. Firewall instellen (UFW)
-echo "🛡️  Firewall controleren..."
-if ufw status | grep -q "Status: active"; then
-    echo "   Firewall is actief, poorten 80 en 443 worden geopend..."
-    ufw allow 'Nginx Full'
-else
-    echo "   Firewall staat uit, geen actie nodig."
-fi
-
-# 3. Nginx Configuratie aanmaken
-echo "📝 Nginx config aanmaken voor $DOMAIN..."
-CONFIG_FILE="/etc/nginx/sites-available/$DOMAIN"
-
-# Zorg dat TARGET http:// bevat als het er niet in staat
-if [[ $TARGET != http* ]]; then
-    PROXY_TARGET="http://$TARGET"
-else
-    PROXY_TARGET=$TARGET
-fi
-
-cat <<EOF > "$CONFIG_FILE"
+    cat <<EOF > "$CONFIG_FILE"
 server {
     listen 80;
     server_name $DOMAIN www.$DOMAIN;
@@ -80,7 +66,7 @@ server {
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
-        # WebSocket ondersteuning
+        # WebSocket support
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -88,35 +74,82 @@ server {
 }
 EOF
 
-# 4. Activeren en Testen
-echo "🔗 Configureren en testen..."
-ln -sf "$CONFIG_FILE" "/etc/nginx/sites-enabled/"
+    # Activeren
+    ln -sf "$CONFIG_FILE" "/etc/nginx/sites-enabled/"
+    rm -f /etc/nginx/sites-enabled/default
 
-# Test de nginx configuratie
-if nginx -t; then
-    echo "   Configuratie is correct. Nginx herladen..."
-    systemctl reload nginx
-else
-    echo "❌ Er zit een fout in de Nginx config. We breken de SSL aanvraag af."
-    exit 1
-fi
+    if nginx -t; then
+        systemctl reload nginx
+        echo "✅ Nginx geconfigureerd."
+    else
+        echo "❌ Fout in Nginx configuratie. Controleer je invoer."
+        return
+    fi
 
-# 5. SSL Certificaat via Certbot
-echo "🔒 SSL Certificaat aanvragen via Let's Encrypt..."
-echo "Let op: Je DNS moet al verwijzen naar dit IP!"
+    # SSL Certificaat
+    echo "🔒 SSL Certificaat aanvragen..."
+    certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
 
-certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email
+    echo "✅ Klaar! https://$DOMAIN is nu actief."
+    echo "Druk op ENTER om terug te gaan..."
+    read -r < /dev/tty
+}
 
-if [ $? -eq 0 ]; then
+# Functie om een proxy te verwijderen
+delete_proxy() {
     echo ""
-    echo "======================================================="
-    echo "✅ ALLES IS VOLTOOID!"
-    echo "Website: https://$DOMAIN"
-    echo "De site wordt doorgestuurd naar: $PROXY_TARGET"
-    echo "De firewall staat goed en SSL is actief."
-    echo "======================================================="
-else
-    echo ""
-    echo "⚠️  SSL aanvraag mislukt. Controleer of je DNS goed staat."
-    echo "Je kunt SSL later handmatig proberen met: sudo certbot --nginx"
-fi
+    echo "--- Bestaande configuraties ---"
+    
+    # Haal alle .conf bestanden op in sites-available
+    cd /etc/nginx/sites-available/ || exit
+    FILES=(*.conf)
+    
+    if [ "${FILES[0]}" == "*.conf" ]; then
+        echo "Geen proxy configuraties gevonden."
+        echo "Druk op ENTER om terug te gaan..."
+        read -r < /dev/tty
+        return
+    fi
+
+    # Toon de lijst met nummers
+    for i in "${!FILES[@]}"; do
+        echo "$((i+1))) ${FILES[$i]}"
+    done
+    echo "$(( ${#FILES[@]} + 1 ))) Annuleren"
+
+    echo -n "Welk nummer wil je VERWIJDEREN? "
+    read -r FILE_INDEX < /dev/tty
+
+    # Controleer of keuze geldig is
+    if [[ "$FILE_INDEX" -gt 0 && "$FILE_INDEX" -le "${#FILES[@]}" ]]; then
+        SELECTED_FILE="${FILES[$((FILE_INDEX-1))]}"
+        
+        echo -n "Weet je zeker dat je $SELECTED_FILE wilt verwijderen? (y/n): "
+        read -r CONFIRM < /dev/tty
+        
+        if [[ "$CONFIRM" == "y" ]]; then
+            rm -f "/etc/nginx/sites-available/$SELECTED_FILE"
+            rm -f "/etc/nginx/sites-enabled/$SELECTED_FILE"
+            systemctl reload nginx
+            echo "✅ $SELECTED_FILE is verwijderd."
+        else
+            echo "Verwijdering geannuleerd."
+        fi
+    else
+        echo "Geannuleerd."
+    fi
+
+    echo "Druk op ENTER om terug te gaan..."
+    read -r < /dev/tty
+}
+
+# Hoofdloop van het script
+while true; do
+    show_menu
+    case $CHOICE in
+        1) create_proxy ;;
+        2) delete_proxy ;;
+        3) exit 0 ;;
+        *) echo "Ongeldige keuze" ;;
+    esac
+done
